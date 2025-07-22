@@ -24,22 +24,18 @@ from tools.route import get_cluster, get_distance_matrix, get_route
 from shapely.geometry import LineString
 from dotenv import load_dotenv
 import time
-
+from langchain_openai import ChatOpenAI
 
 load_dotenv()
 
 if "GOOGLE_API_KEY" not in os.environ:
     os.environ["GOOGLE_API_KEY"] = os.getenv("GOOGLE_API_KEY")
-
-llm = ChatGoogleGenerativeAI(
-    model="gemini-2.0-flash-thinking-exp-01-21",
-    temperature=0,
-    max_tokens=None,
-    timeout=None,
-    max_retries=2,
-    callbacks=[StreamingStdOutCallbackHandler()],
-    # other params...
-)
+if "OPENAI_API_KEY" not in os.environ:
+    os.environ["OPENAI_API_KEY"] = os.getenv("OPENAI_API_KEY")
+if "GOOGLE_MODEL" not in os.environ:
+    os.environ["GOOGLE_MODEL"] = os.getenv("GOOGLE_MODEL")
+if "OPENAI_MODEL" not in os.environ:
+    os.environ["OPENAI_MODEL"] = os.getenv("OPENAI_MODEL")
 
 
 class GeoColumn(TypedDict):
@@ -73,486 +69,515 @@ class AgentState(TypedDict):
 
 class Extract(BaseModel):
     overpassInstructions: List[str] = Field(
-        description="prompt instruction to get data via overpass API"
+        description="prompt instructions to get data via overpass API"
     )
     steps: List[str] = Field(description="steps to answer user question")
     location: str = Field(description="detailed location of user input")
 
 
-def process_message(state: AgentState) -> AgentState:
-    human_message = state["messages"][-1]
-    input_text = human_message.content
-
-    location_extraction_prompt = ChatPromptTemplate.from_messages(
-        [
-            (
-                "system",
-                "You are a trip/vacation planning classifier. Your task is to analyze the user's input "
-                "and determine if they are asking you to plan a trip, itinerary, or travel arrangements."
-                "\n\n"
-                "If the input explicitly or implicitly requests assistance with planning travel "
-                "(e.g., Create a trip plan to Bangkok, plan a trip to Bali "
-                "detailing activities for a journey), return `true`."
-                "\n"
-                "Otherwise, if the input is about a different topic, return `false`."
-                "\n\n"
-                "Respond with only `true` or `false`.",
-            ),
-            ("human", "{input}"),
-        ]
-    )
-    response = llm.invoke(location_extraction_prompt.format_messages(input=input_text))
-    print("response : ", response.content)
-    if response.content in ["True", "true", True, "TRUE"]:
-        return {"trip": True}
-    return {"trip": False}
-
-
-def classifier(state):
-    if state.get("trip", True):
-        return "extract_location"
-    else:
-        return "usual"
-
-
-def usual(state: AgentState) -> AgentState:
-    human_message = state["messages"][-1]
-    # print(human_message)
-    final_answer = llm.invoke(human_message.content)
-    return {"finalResponse": final_answer}
-
-
-def extract_location(state: AgentState) -> AgentState:
-    """Extract location from the user message"""
-
-    human_message = state["messages"][-1]
-    input_text = human_message.content
-
-    location_extraction_prompt = ChatPromptTemplate.from_messages(
-        [
-            (
-                "system",
-                "You are an AI assistant that give plan to user trip by extracting location names from user messages, creating 2 text instructions to get data via overpass API based on user input, and at max three steps to plan the trip."
-                "Identify the most specific location mentioned. Create 2 text instructions to get overpass API that return the body and Create at max 3 steps to plan the trip with the last step is to summarize the answers while the rest is to process data from overpass."
-                "Return the name of the location, overpass instructions, and steps, nothing else.",
-            ),
-            ("human", "extract information from: {input}"),
-        ]
-    )
-
-    # print('input_text (extract_location) : ',input_text)
-    structured_llm = llm.with_structured_output(Extract)
-    response = structured_llm.invoke(
-        location_extraction_prompt.format_messages(input=input_text)
-    )
-    # print('response (extract_location) : ',response)
-    return {
-        "location": response.location,
-        "steps": response.steps,
-        "overpassInstructions": response.overpassInstructions,
-        "stepsState": -int(len(response.steps)),
-        "evalState": 0,
-    }
-
-
-# Define the geocoding node
-def geocode_location(state: AgentState) -> AgentState:
-    """Get geocode data for the extracted location"""
-    location = state.get("location")
-
-    if not location:
-        return {"error": "No location found in the message."}
-
-    geocode_data, error = get_osm_id_from_nominatim(location)
-
-    if error:
-        return {"error": error}
-
-    return {"geocode_data": geocode_data}
-
-
-def generate_response(state: AgentState) -> AgentState:
-    """Generate a response based on the location and geocode data"""
-    location = state.get("location", "Unknown location")
-    geocode_data = state.get("geocode_data", {})
-    error = state.get("error")
-    overpassInstructions = state.get("overpassInstructions", [])
-
-    response_prompt = ChatPromptTemplate.from_messages(
-        [
-            (
-                "system",
-                """
-     Assistant is an expert OpenStreetMap Overpass API assistant.
-
-        For each question that the user supplies, the assistant will reply with:
-        The text of a valid Overpass API query using OSM geocode id that can be used to answer the question using geocode data: {geocode_data}. 
-        The query should be enclosed by three backticks on new lines, denoting that it is a code block.
-        the first line of the code is:
-        [out:json];
-        the last three lines of the code are:
-            `// Output results
-            out body;
-            >;
-            out skel qt;
-            `
-        if you need to filter based on proximity use this example:
-        `// Filter tourism features that are within 50m of any canal
-            (
-            node.tourism_features(around.canals:50);
-            way.tourism_features(around.canals:50);
-            );`
-        choose carefully if the code will use node, way, or relation or any combination of them:
-        for example if user asked for canal only fetch `way` objects
-    Assistant will reply with only a relevant Overpass API that return the body information in form of json.
-        """,
-            ),
-            (
-                "human",
-                "Please, create the overpas query for: {human_input} with this geocode data: {geocode_data}",
-            ),
-        ]
-    )
-
-    if error:
-        return {
-            "messages": state["messages"]
-            + [{"role": "assistant", "content": f"I encountered an error: {error}"}]
-        }
-
-    responses = []
-    for instruction in overpassInstructions:
-        # print('instruction : ',instruction)
-        response = llm.invoke(
-            response_prompt.format_messages(
-                location=location,
-                geocode_data=json.dumps(geocode_data, indent=2),
-                human_input=instruction,
-            )
-        )
-        responses.append(response.content)
-
-    return {"overpassResponses": responses}
-
-
-def execute_code(state: AgentState) -> AgentState:
-    """Generate a response based on the location and geocode data"""
-    try:
-        overpassResponses = state.get("overpassResponses", None)
-
-        combined_gdf = get_response(overpassResponses)
-
-        combined_gdf = combined_gdf[~combined_gdf["geometry"].is_empty]
-
-        cluster_gdf = get_cluster(combined_gdf)
-
-        clust_centroid, distance_matrix = get_distance_matrix(cluster_gdf)
-
-        route = get_route(distance_matrix)
-
-        file_name = f"./data/sample_{uuid.uuid4()}.gpkg"
-
-        combined_gdf.to_file(file_name)
-
-        df_order = pd.DataFrame(
-            {"clust": route, "order": [i for i in range(len(route))]}
-        )
-
-        df_order = clust_centroid.merge(df_order, on="clust")
-
-        path = df_order.sort_values("order")[0].to_list()
-
-        path = LineString(path + [path[0]])
-
-        return {
-            "overpassStatus": True,
-            "geopandasData": file_name,
-            "route": route,
-            "geopandasColumn": {
-                "column": combined_gdf.columns.to_list(),
-                "featureValue": list(combined_gdf["feature"].unique()),
-            },
-        }
-    except:
-        return {"overpassStatus": False}
-
-
-def overpass_status(state):
-    if state.get("overpassStatus", True):
-        return "get_code"
-    else:
-        return "usual"
-
-
-def get_code(state: AgentState) -> AgentState:
-    # (geopandas_link,column,question):
-    geopandas_link = state.get("geopandasData", None)
-    column = state.get("geopandasColumn", None)
-    curr_state = state.get("stepsState", None)
-    step = state.get("steps", None)
-    question = step[curr_state]
-
-    column_list = column.get("column")
-    featureValue = column.get("featureValue")
-
-    code_creation_prompt = ChatPromptTemplate.from_messages(
-        [
-            (
-                "system",
-                """
-    You are an expert in Geospatial Data Science, specifically with Geopandas library.
-    Your task is to generate Geopandas code to answer a user's question, which will be executed within a `PythonAstREPLTool`.
-
-    Here's the context you'll be working with:
-
-    1.  **Geopandas Data:** You will be provided with a link to a Geopandas GeoPackage (`.gpkg`) file.
-        * `geopandas_link`: {geopandas_link}
-        * `geopandas columns` : {column_list}
-        * `geopandas feature values` : {featureValue}
-
-    2.  **Geopandas DataFrame Structure:** The Geopandas DataFrame loaded from the provided link will have at least the following columns, along with their descriptions and potential values:
-
-        * `id`:
-            * **Description:** Unique identifier for the geospatial object. 
-        * `geometry`:
-            * **Description:** The geometric representation of the object (e.g., Point, LineString, Polygon). This is the standard Geopandas 'geometry' column.
-        * `name`:
-            * **Description:** The common name of the object.
-        * `feature`:
-            * **Description:** A general descriptive tag for the object's distinct characteristic or primary function, if not covered by other specific tags. 
-            * **Examples:** {featureValue}
-        * `clust`:
-            * **Description:** cluster of geospatial object
-            * **Examples:** 0, 1, 2
-
-    3.  **User's Question:**
-        * `question`: {question}
-
-    **Your Goal:**
-
-    Generate clean, efficient, and correct Geopandas Python code that, when executed in a `PythonAstREPLTool`, will provide the answer to the `question`.
-    If possible, always omit using 'addr:city' to filter out location is this column is often incomplete. 
-    And always refer geopandas feature columns values to filter value in feature columns.
-    
-
-    **Important Considerations for Code Generation:**
-
-    * **Load Data:** Always start by loading the Geopandas DataFrame using `gpd.read_file(geopandas_link)`. Assign it to a variable named `gdf`.
-    * **Column Names:** Strictly adhere to the provided column names (e.g., `feature`, `building:use`).
-    * **Output:** The final output of your code should be the direct answer to the question that is printed. This is a specific value, a count, a list, etc. Do not output whole dataframe. 
-    * **Error Handling:** Assume the input `.gpkg` file is valid and contains the described columns. Do not add explicit error handling unless specifically requested.
-    * **Clarity and Conciseness:** Write Pythonic and readable code. Prioritize to do the operation on cluster level. if the user question features are not in `geopandas feature value`, use similar `geopandas feature value` that match the question.
-    * **Avoid Unnecessary Imports:** Only import `geopandas` as `gpd` and other necessary libraries if truly required (e.g., `numpy` for specific operations,).
-     """,
-            ),
-            ("human", "create code to answer: {question}"),
-        ]
-    )
-    # print("params : \n", geopandas_link, column_list, featureValue, question)
-    try:
-        # code =  llm.invoke(code_prompt)
-        print("params : \n", geopandas_link, column_list, featureValue, question)
-        time.sleep(0.1)
-        code = llm.invoke(
-            code_creation_prompt.format_messages(
-                geopandas_link=geopandas_link,
-                column_list=", ".join(column_list),
-                featureValue=", ".join(featureValue),
-                question=question,
-            )
-        )
-        # code = None
-        # print("get_code : ", code.content)
-        # code_resp = get_exec_printed_result(process_overpass(code.content))
-        return {
-            # "codeResult": code_resp,
-            "stepCodes": code.content,
-            "codeStatus": "PASS",
-        }
-    except Exception as e:
-        print("get_code ERR : \n", e)
-        # if code is None:
-        return {
-            "error": "No code generated",
-            "codeStatus": "ERROR",
-            "stepCodes": "NO CODE GENERATED",
-        }
-    # else:
-
-
-def execute_python(state: AgentState) -> AgentState:
-    evalState = state.get("evalState", 0)
-    step = state.get("stepsState", -3)
-    try:
-        print(
-            "execute_python --------------",
-        )
-        print("evalState : ", evalState)
-        print("step : ", step)
-        code = state.get("stepCodes")[-1]
-        print("code \n ", type(code))
-        print("code \n ", code)
-        code_resp = get_exec_printed_result(process_overpass(code))
-        print("CHECK")
-        return {"codeResult": code_resp, "codeStatus": "PASS", "stepsState": step + 1}
-    except Exception as e:
-        print("code : \n", code)
-        return {
-            "error": e,
-            "codeStatus": "ERROR",
-            "stepCodes": [m for m in code if isinstance(m, BaseMessage)],
-        }
-
-
-def eval_code(state: AgentState) -> AgentState:
-    evalState = state.get("evalState", 0)
-    stepsState = state.get("stepsState", -3)
-
-    status = state.get("codeStatus", "PASS")
-
-    print("eval_code ------------------------------------------------------------")
-
-    if status == "PASS":
-        print("eval_code: PASS")
-        # stepsState = stepsState + 1
-        code = state.get("stepCodes")[-1]
-
-        state["stepCodes"][-1] = code.content
-        print("PASS-code : \n", code.content)
-        print("PASS-state['stepCodes'][-1] : \n", state["stepCodes"][-1])
-        return {"stepsState": stepsState}
-    elif status == "ERROR" and evalState < 3:
-        # fix the step etc ....
-
-        print("eval_code: ERRR")
-        print("eval_code - stepsState : ", stepsState)
-        err = state.get("err", "")
-        print("eval_code - err : ", err)
-        geopandas_link = state.get("geopandasData", None)
-
-        curr_state = state.get("stepsState", None)
-        step = state.get("steps", [])
-        codes = state.get("stepCodes", [])
-        question = step[curr_state]
-        code = codes[-1]
-        fix_prompt_template = ChatPromptTemplate.from_messages(
-            [
-                (
-                    "system",
-                    """
-                You are an expert at geopandas and want to fix the python code : {code}  
-                that return this {err} when executed.
-                to answer this question: {question}  
-                 
-                
-                Fix the python code such that it will return the code to answer to the question
-                Follow this rules:
-                * Do not make any comments in the code.
-                * Make the code as concise as possible.
-                * use already existed geopandas data: {geopandas_link}
-                """,
-                ),
-                ("human", "fix the {code} code to answer: {question}"),
-            ]
-        )
-        # fix_prompt = f"""
-        # this question: {question}
-        # create python code : {code}
-        # that return this {err} when executed.
-
-        # Fix the python code such that it will return the code to answer to the question
-        # """
-        fix_code = llm.invoke(
-            fix_prompt_template.format_messages(
-                geopandas_link=geopandas_link,
-                question=question,
-                code=code,
-                err=err,
-            )
-        )
-        print("fix_code : \n", fix_code)
-        print("fix_code.content : \n", fix_code.content)
-        evalState = evalState + 1
-        print('state["stepCodes"] : ', state["stepCodes"][-1])
-        state["stepCodes"][-1] = fix_code.content
-        # print('state["stepCodes"] : \n', state["stepCodes"])
-        return {"evalState": evalState}
-
-
-def router(state):
-    status = state.get("codeStatus", "PASS")
-    if state.get("evalState", 0) >= 3:
-        print("to USUAL")
-        return "usual"
-    elif state.get("stepsState", -3) == -1:
-        print("to GET_SUMMARY")
-        return "get_summary"
-    elif status == "ERROR":
-        print("to EVAL_CODE")
-        return "eval_code"
-    else:
-        print("to GET_CODE")
-        return "get_code"
-
-
-def get_summary(state: AgentState) -> AgentState:
-    response = state.get("steps", None)
-    results = state.get("codeResult", None)
-    tour = state.get("route", None)
-
-    response = response[-3:-1]
-    summary = response[-1]
-    wrap_up = "\n".join(
-        [f"task : {resp} \n answer : {res}" for resp, res in zip(response, results)]
-    )
-
-    print("wrap_up : \n", wrap_up)
-
-    summary_prompt = ChatPromptTemplate.from_messages(
-        [
-            (
-                "system",
-                """You are an expert tour guide who provides personalized and efficient tour suggestions. 
-                Your recommendations are always data-driven, utilizing information about the shortest routes between clusters of attractions and task-answer pairs to create optimal experiences.
-                
-                When a user asks for a tour suggestion, you will:
-                
-                Analyze the "shortest route between clusters" data to understand the most efficient paths connecting different groups of attractions.
-                Consult the "task answer pairs" to understand specific user preferences, common questions, or desired outcomes related to tour activities.
-                
-                Synthesize this information to generate a tour suggestion that is:
-                Efficient: Minimizing travel time and maximizing sightseeing.
-                Relevant: Tailored to the user's likely interests based on common patterns or previous interactions (if available).
-                Informative: Providing key details about each stop and why it's recommended.
-                And Friendly.
-                """,
-            ),
-            (
-                "human",
-                """
-                Based on the provided data, craft a comprehensive tour suggestion for the user to answer this questions: {summary}.
-
-                on this data
-
-                1. shortest route between clusters 
-                {tour}
-                2. task answer pairs;
-                {wrap_up}
-             """,
-            ),
-        ]
-    )
-    final_answer = llm.invoke(
-        summary_prompt.format_messages(summary=summary, tour=tour, wrap_up=wrap_up)
-    )
-    return {"finalResponse": final_answer}
-
-
 class AgentGraph:
     def __init__(self):
         self.graph = self._create_graph()
+        self.llm = None
+
+    def model_choose(self, model_source):
+        if model_source == "GOOGLE":
+            self.llm = ChatGoogleGenerativeAI(
+                model=os.environ["GOOGLE_MODEL"],
+                temperature=0,
+                max_tokens=None,
+                timeout=None,
+                max_retries=2,
+                callbacks=[StreamingStdOutCallbackHandler()],
+            )
+        elif model_source == "OPENAI":
+            self.llm = ChatOpenAI(
+                model=os.environ["OPENAI_MODEL"],  # specify the model name
+                temperature=0,
+                max_tokens=None,
+                max_retries=2,
+                callbacks=[StreamingStdOutCallbackHandler()],
+            )
 
     def _create_graph(self):
+        def process_message(state: AgentState) -> AgentState:
+            human_message = state["messages"][-1]
+            input_text = human_message.content
+
+            location_extraction_prompt = ChatPromptTemplate.from_messages(
+                [
+                    (
+                        "system",
+                        "You are a trip/vacation planning classifier. Your task is to analyze the user's input "
+                        "and determine if they are asking you to plan a trip, itinerary, or travel arrangements."
+                        "\n\n"
+                        "If the input explicitly or implicitly requests assistance with planning travel "
+                        "(e.g., Create a trip plan to Bangkok, plan a trip to Bali "
+                        "detailing activities for a journey), return `true`."
+                        "\n"
+                        "Otherwise, if the input is about a different topic, return `false`."
+                        "\n\n"
+                        "Respond with only `true` or `false`.",
+                    ),
+                    ("human", "{input}"),
+                ]
+            )
+            response = self.llm.invoke(
+                location_extraction_prompt.format_messages(input=input_text)
+            )
+            print("response : ", response.content)
+            if response.content in ["True", "true", True, "TRUE"]:
+                return {"trip": True}
+            return {"trip": False}
+
+        def classifier(state):
+            if state.get("trip", True):
+                return "extract_location"
+            else:
+                return "usual"
+
+        def usual(state: AgentState) -> AgentState:
+            human_message = state["messages"][-1]
+            # print(human_message)
+            final_answer = self.llm.invoke(human_message.content)
+            return {"finalResponse": final_answer}
+
+        def extract_location(state: AgentState) -> AgentState:
+            """Extract location from the user message"""
+
+            human_message = state["messages"][-1]
+            input_text = human_message.content
+
+            location_extraction_prompt = ChatPromptTemplate.from_messages(
+                [
+                    (
+                        "system",
+                        "You are an AI assistant that give plan to user trip by extracting location names from user messages, creating 2 text instructions for creating instructions to get data via overpass API based on user input, and at max three steps to plan the trip."
+                        "Identify the most specific location mentioned. Create 2 text instructions for creating overpass API that return the body and Create at max 3 steps to plan the trip with the last step is to summarize the answers while the rest is to process data from overpass."
+                        "Return the name of the location, overpass instructions, and steps, nothing else."
+                        "Do not fetch the builidings in the area.",
+                    ),
+                    ("human", "extract information from: {input}"),
+                ]
+            )
+
+            # print('input_text (extract_location) : ',input_text)
+            structured_llm = self.llm.with_structured_output(Extract)
+            response = structured_llm.invoke(
+                location_extraction_prompt.format_messages(input=input_text)
+            )
+            # print('response (extract_location) : ',response)
+            return {
+                "location": response.location,
+                "steps": response.steps,
+                "overpassInstructions": response.overpassInstructions,
+                "stepsState": -int(len(response.steps)),
+                "evalState": 0,
+            }
+
+        # Define the geocoding node
+        def geocode_location(state: AgentState) -> AgentState:
+            """Get geocode data for the extracted location"""
+            location = state.get("location")
+
+            if not location:
+                return {"error": "No location found in the message."}
+
+            geocode_data, error = get_osm_id_from_nominatim(location)
+
+            if error:
+                return {"error": error}
+
+            return {"geocode_data": geocode_data}
+
+        def generate_response(state: AgentState) -> AgentState:
+            """Generate a response based on the location and geocode data"""
+            location = state.get("location", "Unknown location")
+            geocode_data = state.get("geocode_data", {})
+            error = state.get("error")
+            overpassInstructions = state.get("overpassInstructions", [])
+
+            response_prompt = ChatPromptTemplate.from_messages(
+                [
+                    (
+                        "system",
+                        """
+            Assistant is an expert OpenStreetMap Overpass API assistant.
+
+                For each question that the user supplies, the assistant will reply with:
+                The text of a valid Overpass API query using OSM geocode id that can be used to answer the question using geocode data: {geocode_data}. 
+                The query should be enclosed by three backticks on new lines, denoting that it is a code block.
+                the first line of the code is:
+                [out:json];
+                the last three lines of the code are:
+                    `// Output results
+                    out body;
+                    >;
+                    out skel qt;
+                    `
+                if you need to filter based on proximity use this example:
+                `// Filter tourism features that are within 50m of any canal
+                    (
+                    node.tourism_features(around.canals:50);
+                    way.tourism_features(around.canals:50);
+                    );`
+                choose carefully if the code will use node, way, or relation or any combination of them:
+                for example if user asked for canal only fetch `way` objects
+            Assistant will reply with only a relevant Overpass API that return the body information in form of json.
+            Do not fetch the builidings in the area..
+                """,
+                    ),
+                    (
+                        "human",
+                        "Please, create the overpas query for: {human_input} with this geocode data: {geocode_data}",
+                    ),
+                ]
+            )
+
+            if error:
+                return {
+                    "messages": state["messages"]
+                    + [
+                        {
+                            "role": "assistant",
+                            "content": f"I encountered an error: {error}",
+                        }
+                    ]
+                }
+
+            responses = []
+            for instruction in overpassInstructions:
+                # print('instruction : ',instruction)
+                response = self.llm.invoke(
+                    response_prompt.format_messages(
+                        location=location,
+                        geocode_data=json.dumps(geocode_data, indent=2),
+                        human_input=instruction,
+                    )
+                )
+                responses.append(response.content)
+
+            return {"overpassResponses": responses}
+
+        def execute_code(state: AgentState) -> AgentState:
+            """Generate a response based on the location and geocode data"""
+            try:
+                overpassResponses = state.get("overpassResponses", None)
+
+                combined_gdf = get_response(overpassResponses)
+
+                combined_gdf = combined_gdf[~combined_gdf["geometry"].is_empty]
+
+                cluster_gdf = get_cluster(combined_gdf)
+
+                clust_centroid, distance_matrix = get_distance_matrix(cluster_gdf)
+
+                route = get_route(distance_matrix)
+
+                file_name = f"./data/sample_{uuid.uuid4()}.gpkg"
+
+                combined_gdf.to_file(file_name)
+
+                df_order = pd.DataFrame(
+                    {"clust": route, "order": [i for i in range(len(route))]}
+                )
+
+                df_order = clust_centroid.merge(df_order, on="clust")
+
+                path = df_order.sort_values("order")[0].to_list()
+
+                path = LineString(path + [path[0]])
+
+                return {
+                    "overpassStatus": True,
+                    "geopandasData": file_name,
+                    "route": route,
+                    "geopandasColumn": {
+                        "column": combined_gdf.columns.to_list(),
+                        "featureValue": list(combined_gdf["feature"].unique()),
+                    },
+                }
+            except:
+                return {"overpassStatus": False}
+
+        def overpass_status(state):
+            if state.get("overpassStatus", True):
+                return "get_code"
+            else:
+                return "usual"
+
+        def get_code(state: AgentState) -> AgentState:
+            # (geopandas_link,column,question):
+            geopandas_link = state.get("geopandasData", None)
+            column = state.get("geopandasColumn", None)
+            curr_state = state.get("stepsState", None)
+            step = state.get("steps", None)
+            question = step[curr_state]
+
+            column_list = column.get("column")
+            featureValue = column.get("featureValue")
+
+            code_creation_prompt = ChatPromptTemplate.from_messages(
+                [
+                    (
+                        "system",
+                        """
+            You are an expert in Geospatial Data Science, specifically with Geopandas library.
+            Your task is to generate Geopandas code to answer a user's question, which will be executed within a `PythonAstREPLTool`.
+
+            Here's the context you'll be working with:
+
+            1.  **Geopandas Data:** You will be provided with a link to a Geopandas GeoPackage (`.gpkg`) file.
+                * `geopandas_link`: {geopandas_link}
+                * `geopandas columns` : {column_list}
+                * `geopandas feature values` : {featureValue}
+
+            2.  **Geopandas DataFrame Structure:** The Geopandas DataFrame loaded from the provided link will have at least the following columns, along with their descriptions and potential values:
+
+                * `id`:
+                    * **Description:** Unique identifier for the geospatial object. 
+                * `geometry`:
+                    * **Description:** The geometric representation of the object (e.g., Point, LineString, Polygon). This is the standard Geopandas 'geometry' column.
+                * `name`:
+                    * **Description:** The common name of the object.
+                * `feature`:
+                    * **Description:** A general descriptive tag for the object's distinct characteristic or primary function, if not covered by other specific tags. 
+                    * **Examples:** {featureValue}
+                * `clust`:
+                    * **Description:** cluster of geospatial object
+                    * **Examples:** 0, 1, 2
+
+            3.  **User's Question:**
+                * `question`: {question}
+
+            **Your Goal:**
+
+            Generate clean, efficient, and correct Geopandas Python code that, when executed in a `PythonAstREPLTool`, will provide the answer to the `question`.
+            If possible, always omit using 'addr:city' to filter out location is this column is often incomplete. 
+            And always refer geopandas feature columns values to filter value in feature columns.
+            
+
+            **Important Considerations for Code Generation:**
+
+            * **Load Data:** Always start by loading the Geopandas DataFrame using `gpd.read_file(geopandas_link)`. Assign it to a variable named `gdf`.
+            * **Column Names:** Strictly adhere to the provided column names (e.g., `feature`, `building:use`).
+            * **Output:** The final output of your code should be the direct answer to the question that is printed. This is a specific value, a count, a list, etc. Do not output whole dataframe. 
+            * **Error Handling:** Assume the input `.gpkg` file is valid and contains the described columns. Do not add explicit error handling unless specifically requested.
+            * **Clarity and Conciseness:** Write Pythonic and readable code. Prioritize to do the operation on cluster level. if the user question features are not in `geopandas feature value`, use similar `geopandas feature value` that match the question.
+            * **Avoid Unnecessary Imports:** Only import `geopandas` as `gpd` and other necessary libraries if truly required (e.g., `numpy` for specific operations,).
+            """,
+                    ),
+                    ("human", "create code to answer: {question}"),
+                ]
+            )
+            # print("params : \n", geopandas_link, column_list, featureValue, question)
+            try:
+                # code =  llm.invoke(code_prompt)
+                print(
+                    "params : \n", geopandas_link, column_list, featureValue, question
+                )
+                time.sleep(0.1)
+                code = self.llm.invoke(
+                    code_creation_prompt.format_messages(
+                        geopandas_link=geopandas_link,
+                        column_list=", ".join(column_list),
+                        featureValue=", ".join(featureValue),
+                        question=question,
+                    )
+                )
+                # code = None
+                # print("get_code : ", code.content)
+                # code_resp = get_exec_printed_result(process_overpass(code.content))
+                return {
+                    # "codeResult": code_resp,
+                    "stepCodes": code.content,
+                    "codeStatus": "PASS",
+                }
+            except Exception as e:
+                print("get_code ERR : \n", e)
+                # if code is None:
+                return {
+                    "error": "No code generated",
+                    "codeStatus": "ERROR",
+                    "stepCodes": "NO CODE GENERATED",
+                }
+            # else:
+
+        def execute_python(state: AgentState) -> AgentState:
+            evalState = state.get("evalState", 0)
+            step = state.get("stepsState", -3)
+            try:
+                print(
+                    "execute_python --------------",
+                )
+                print("evalState : ", evalState)
+                print("step : ", step)
+                code = state.get("stepCodes")[-1]
+                print("code \n ", type(code))
+                print("code \n ", code)
+                code_resp = get_exec_printed_result(process_overpass(code))
+                print("CHECK")
+                return {
+                    "codeResult": code_resp,
+                    "codeStatus": "PASS",
+                    "stepsState": step + 1,
+                }
+            except Exception as e:
+                print("code : \n", code)
+                return {
+                    "error": e,
+                    "codeStatus": "ERROR",
+                    "stepCodes": [m for m in code if isinstance(m, BaseMessage)],
+                }
+
+        def eval_code(state: AgentState) -> AgentState:
+            evalState = state.get("evalState", 0)
+            stepsState = state.get("stepsState", -3)
+
+            status = state.get("codeStatus", "PASS")
+
+            print(
+                "eval_code ------------------------------------------------------------"
+            )
+
+            if status == "PASS":
+                print("eval_code: PASS")
+                # stepsState = stepsState + 1
+                code = state.get("stepCodes")[-1]
+
+                state["stepCodes"][-1] = code.content
+                print("PASS-code : \n", code.content)
+                print("PASS-state['stepCodes'][-1] : \n", state["stepCodes"][-1])
+                return {"stepsState": stepsState}
+            elif status == "ERROR" and evalState < 3:
+                # fix the step etc ....
+
+                print("eval_code: ERRR")
+                print("eval_code - stepsState : ", stepsState)
+                err = state.get("err", "")
+                print("eval_code - err : ", err)
+                geopandas_link = state.get("geopandasData", None)
+
+                curr_state = state.get("stepsState", None)
+                step = state.get("steps", [])
+                codes = state.get("stepCodes", [])
+                question = step[curr_state]
+                code = codes[-1]
+                fix_prompt_template = ChatPromptTemplate.from_messages(
+                    [
+                        (
+                            "system",
+                            """
+                        You are an expert at geopandas and want to fix the python code : {code}  
+                        that return this {err} when executed.
+                        to answer this question: {question}  
+                        
+                        
+                        Fix the python code such that it will return the code to answer to the question
+                        Follow this rules:
+                        * Do not make any comments in the code.
+                        * Make the code as concise as possible.
+                        * use already existed geopandas data: {geopandas_link}
+                        """,
+                        ),
+                        ("human", "fix the {code} code to answer: {question}"),
+                    ]
+                )
+                # fix_prompt = f"""
+                # this question: {question}
+                # create python code : {code}
+                # that return this {err} when executed.
+
+                # Fix the python code such that it will return the code to answer to the question
+                # """
+                fix_code = self.llm.invoke(
+                    fix_prompt_template.format_messages(
+                        geopandas_link=geopandas_link,
+                        question=question,
+                        code=code,
+                        err=err,
+                    )
+                )
+                print("fix_code : \n", fix_code)
+                print("fix_code.content : \n", fix_code.content)
+                evalState = evalState + 1
+                print('state["stepCodes"] : ', state["stepCodes"][-1])
+                state["stepCodes"][-1] = fix_code.content
+                # print('state["stepCodes"] : \n', state["stepCodes"])
+                return {"evalState": evalState}
+
+        def router(state):
+            status = state.get("codeStatus", "PASS")
+            if state.get("evalState", 0) >= 3:
+                print("to USUAL")
+                return "usual"
+            elif state.get("stepsState", -3) == -1:
+                print("to GET_SUMMARY")
+                return "get_summary"
+            elif status == "ERROR":
+                print("to EVAL_CODE")
+                return "eval_code"
+            else:
+                print("to GET_CODE")
+                return "get_code"
+
+        def get_summary(state: AgentState) -> AgentState:
+            response = state.get("steps", None)
+            results = state.get("codeResult", None)
+            tour = state.get("route", None)
+
+            response = response[-3:-1]
+            summary = response[-1]
+            wrap_up = "\n".join(
+                [
+                    f"task : {resp} \n answer : {res}"
+                    for resp, res in zip(response, results)
+                ]
+            )
+
+            print("wrap_up : \n", wrap_up)
+
+            summary_prompt = ChatPromptTemplate.from_messages(
+                [
+                    (
+                        "system",
+                        """You are an expert tour guide who provides personalized and efficient tour suggestions. 
+                        Your recommendations are always data-driven, utilizing information about the shortest routes between clusters of attractions and task-answer pairs to create optimal experiences.
+                        
+                        When a user asks for a tour suggestion, you will:
+                        
+                        Analyze the "shortest route between clusters" data to understand the most efficient paths connecting different groups of attractions.
+                        Consult the "task answer pairs" to understand specific user preferences, common questions, or desired outcomes related to tour activities.
+                        
+                        Synthesize this information to generate a tour suggestion that is:
+                        Efficient: Minimizing travel time and maximizing sightseeing.
+                        Relevant: Tailored to the user's likely interests based on common patterns or previous interactions (if available).
+                        Informative: Providing key details about each stop and why it's recommended.
+                        And Friendly.
+                        """,
+                    ),
+                    (
+                        "human",
+                        """
+                        Based on the provided data, craft a comprehensive tour suggestion for the user to answer this questions: {summary}.
+
+                        on this data
+
+                        1. shortest route between clusters 
+                        {tour}
+                        2. task answer pairs;
+                        {wrap_up}
+                    """,
+                    ),
+                ]
+            )
+            final_answer = self.llm.invoke(
+                summary_prompt.format_messages(
+                    summary=summary, tour=tour, wrap_up=wrap_up
+                )
+            )
+            return {"finalResponse": final_answer}
+
         # Build the graph
         workflow = StateGraph(AgentState)
 

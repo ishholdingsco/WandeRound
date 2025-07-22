@@ -9,9 +9,6 @@ import branca.colormap as cm
 from streamlit_folium import st_folium, folium_static
 import app
 
-if "chatbot" not in st.session_state:
-    st.session_state.chatbot = app.AgentGraph()
-
 
 class ChatbotThreadManager:
     def __init__(self, data_file: str = "chat_threads.json"):
@@ -118,7 +115,11 @@ class ChatbotThreadManager:
 def main():
     st.set_page_config(page_title="Chatbot with Threads", page_icon="💬", layout="wide")
 
-    st.title("💬 Chatbot with Thread Management")
+    st.title("🗺️ WANDEROUND")
+
+    # moved from the very top
+    if "chatbot" not in st.session_state:
+        st.session_state.chatbot = app.AgentGraph()
 
     # Initialize thread manager
     if "thread_manager" not in st.session_state:
@@ -214,12 +215,23 @@ def main():
             )
             st.session_state.current_thread_id = new_thread_id
             st.rerun()
+
     else:
         # Display current thread title
         current_thread = st.session_state.thread_manager.threads.get(
             st.session_state.current_thread_id, {}
         )
         st.subheader(f"💬 {current_thread.get('title', 'Chat Thread')}")
+
+        model_option = st.selectbox(
+            "Choose model source?",
+            ("GOOGLE", "OPENAI"),
+            index=None,
+            placeholder="Select contact method...",
+        )
+        st.write("You selected:", model_option)
+
+        st.session_state.chatbot.model_choose(model_option)
 
         # Chat messages container
         messages = st.session_state.thread_manager.get_thread_messages(

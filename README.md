@@ -6,8 +6,11 @@ Wanderound Demo Video
 
 ## Start the project
 
-1. Get gemini API key from google ai studio (aistudio.google.com)
+1. Get gemini API key from google ai studio (aistudio.google.com) or OPEN AI API key, specify the model to be used
    `GOOGLE_API_KEY = `
+   `OPENAI_API_KEY = `
+   `GOOGLE_MODEL = `
+   `OPENAI_MODEL = `
 
 2. build & run the docker
    `docker build -t wanderound .`

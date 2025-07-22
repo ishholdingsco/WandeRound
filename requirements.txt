@@ -1,4 +1,5 @@
 streamlit>=1.28.0
+openai
 pandas
 numpy
 geopandas
@@ -15,3 +16,4 @@ matplotlib
 mapclassify
 python-dotenv
 streamlit_folium
+langchain-openai
