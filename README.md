@@ -19,3 +19,4 @@ Wanderound Demo Video
 ## dev note
 
 I'm really thankful to the OSM, Overpass, and Nominatim communities so that this project can happen.
+Thx to @AshecOne that tested this code and ISHteam that helped me a lot in 2025
