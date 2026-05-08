@@ -28,7 +28,7 @@ export interface GeoJSONData {
 }
 
 export interface SSEEvent {
-  type: "thinking" | "overpass" | "code" | "map" | "response" | "done" | "error";
+  type: "thinking" | "overpass" | "code" | "map" | "response" | "delta" | "done" | "error";
   content?: string;
   steps?: string[];
   overpass?: string[];

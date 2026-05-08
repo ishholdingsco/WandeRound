@@ -1,5 +1,6 @@
 import os
 import json
+import traceback
 import geopandas as gpd
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
@@ -30,7 +31,7 @@ def _sse(data: dict) -> str:
     return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
-def _run_agent(message: str):
+async def _run_agent(message: str):
     state = {
         "messages": [{"role": "user", "content": message}],
         "location": None,
@@ -40,23 +41,41 @@ def _run_agent(message: str):
     geopandas_file: Optional[str] = None
     final_response = ""
     thinking_steps: list = []
+    streamed_response = ""
+    streaming_nodes = {"usual", "get_summary"}
 
     try:
-        for chunk in _agent.graph.stream(state, stream_mode="updates"):
-            for key, value in chunk.items():
-                if "steps" in value:
-                    steps = value.get("steps", [])
-                    overpass_instr = value.get("overpassInstructions", [])
+        async for ev in _agent.graph.astream_events(state, version="v2"):
+            kind = ev.get("event", "")
+            meta = ev.get("metadata") or {}
+            node = meta.get("langgraph_node", "") if isinstance(meta, dict) else ""
+
+            if kind == "on_chat_model_stream" and node in streaming_nodes:
+                chunk = ev.get("data", {}).get("chunk")
+                content = getattr(chunk, "content", "") if chunk is not None else ""
+                if content:
+                    streamed_response += content
+                    yield _sse({"type": "delta", "content": content})
+                continue
+
+            if kind == "on_chain_end" and node:
+                output = ev.get("data", {}).get("output")
+                if not isinstance(output, dict):
+                    continue
+
+                if "steps" in output:
+                    steps = output.get("steps", [])
+                    overpass_instr = output.get("overpassInstructions", [])
                     thinking_steps += steps + overpass_instr
                     yield _sse({"type": "thinking", "steps": steps, "overpass": overpass_instr})
 
-                if "overpassResponses" in value:
-                    queries = value.get("overpassResponses", [])
+                if "overpassResponses" in output:
+                    queries = output.get("overpassResponses", [])
                     thinking_steps += queries
                     yield _sse({"type": "overpass", "queries": queries})
 
-                if "stepCodes" in value:
-                    codes = value.get("stepCodes")
+                if "stepCodes" in output:
+                    codes = output.get("stepCodes")
                     code = codes[-1] if isinstance(codes, list) else codes
                     if hasattr(code, "content"):
                         code = code.content
@@ -64,11 +83,11 @@ def _run_agent(message: str):
                     thinking_steps.append(code_str)
                     yield _sse({"type": "code", "content": code_str})
 
-                if "geopandasData" in value:
-                    geopandas_file = value.get("geopandasData")
+                if "geopandasData" in output:
+                    geopandas_file = output.get("geopandasData")
 
-                if "finalResponse" in value:
-                    resp = value.get("finalResponse")
+                if "finalResponse" in output:
+                    resp = output.get("finalResponse")
                     if hasattr(resp, "content"):
                         final_response = resp.content
                     elif isinstance(resp, list) and resp:
@@ -76,7 +95,13 @@ def _run_agent(message: str):
                         final_response = r.content if hasattr(r, "content") else str(r)
                     else:
                         final_response = str(resp) if resp else ""
+
+        if streamed_response:
+            final_response = streamed_response
     except Exception as e:
+        print("=== AGENT ERROR ===")
+        traceback.print_exc()
+        print("=== END ERROR ===")
         yield _sse({"type": "error", "content": str(e)})
         yield _sse({"type": "done", "content": f"Error: {e}", "thinking": thinking_steps, "file": None})
         return
@@ -170,4 +195,4 @@ def get_map(file: str):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(api, host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("server:api", host="0.0.0.0", port=8000, reload=True)

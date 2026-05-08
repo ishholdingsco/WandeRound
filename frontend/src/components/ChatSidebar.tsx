@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Image from "next/image";
 import { Plus, MessageSquare, Trash2, Pencil, Check, X } from "lucide-react";
 import { cn, formatRelativeTime } from "@/lib/utils";
 import type { Thread } from "@/types";
@@ -12,6 +13,8 @@ interface Props {
   onCreateThread: () => void;
   onDeleteThread: (id: string) => void;
   onRenameThread: (id: string, title: string) => void;
+  isOpen?: boolean;
+  onClose?: () => void;
 }
 
 export function ChatSidebar({
@@ -21,6 +24,8 @@ export function ChatSidebar({
   onCreateThread,
   onDeleteThread,
   onRenameThread,
+  isOpen = false,
+  onClose,
 }: Props) {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
@@ -37,13 +42,31 @@ export function ChatSidebar({
   };
 
   return (
-    <div className="w-60 h-full flex flex-col bg-zinc-950 text-zinc-100 flex-shrink-0 select-none">
+    <div
+      className={cn(
+        "w-60 h-full flex flex-col bg-zinc-950 text-zinc-100 flex-shrink-0 select-none",
+        "fixed inset-y-0 left-0 z-[999] transition-transform duration-200 md:static md:translate-x-0 md:z-auto",
+        isOpen ? "translate-x-0" : "-translate-x-full"
+      )}
+    >
       {/* Brand */}
       <div className="px-4 pt-5 pb-4 flex items-center gap-2.5">
-        <div className="w-6 h-6 rounded-md bg-white flex items-center justify-center flex-shrink-0">
-          <span className="text-zinc-950 text-[11px] font-bold leading-none">W</span>
-        </div>
+        <Image
+          src="/wanderound-icon.png"
+          alt="WandeRound"
+          width={24}
+          height={24}
+          className="flex-shrink-0 [filter:brightness(0)_invert(1)]"
+          priority
+        />
         <span className="font-semibold text-sm tracking-wide">WandeRound</span>
+        <button
+          onClick={onClose}
+          className="ml-auto p-1 rounded hover:bg-zinc-800 text-zinc-400 md:hidden"
+          aria-label="Close sidebar"
+        >
+          <X size={16} />
+        </button>
       </div>
 
       {/* New chat */}

@@ -4,6 +4,7 @@ import geopandas as gpd
 import pandas as pd
 from shapely.geometry import Point, LineString, Polygon, MultiPolygon
 from shapely.ops import polygonize, unary_union
+from concurrent.futures import ThreadPoolExecutor
 import io
 import sys
 
@@ -21,43 +22,28 @@ def get_exec_printed_result(code_string):
     old_stdout = sys.stdout
     redirected_output = io.StringIO()
     sys.stdout = redirected_output
-    print("code_string :\n", code_string)
     try:
-        print("get_exec_printed_result: EXEC")
         exec(code_string)
     except Exception as e:
-        print("get_exec_printed_result: ERR")
-        # You might want to handle exceptions from the executed code
-        # For now, we'll just print them to the *original* stdout
-        # or capture them in a separate stream if needed.
-        sys.stdout = old_stdout  # Restore stdout before printing error
+        sys.stdout = old_stdout
         print(f"Error during exec: {e}", file=sys.stderr)
-        return ""  # Or raise the exception, depending on your needs
+        return ""
     finally:
-        sys.stdout = old_stdout  # Always restore stdout
+        sys.stdout = old_stdout
 
     return redirected_output.getvalue()
 
 
 def get_json(query):
-    # Overpass API endpoint
     url = "https://overpass-api.de/api/interpreter"
-
-    # Send request
-    response = requests.post(url, data={"data": query})
-
-    # Check for success
-    if response.status_code == 200:
-        data = response.json()
-        return data
-    else:
-        return f"Error {response.status_code}: {response.text}"
+    headers = {"User-Agent": "WandeRound/1.0"}
+    response = requests.post(url, data={"data": query}, headers=headers, timeout=45)
+    response.raise_for_status()
+    return response.json()
 
 
 def process_overpass(response):
-    print("response :\n", response)
     cleaned_resp = "\n".join(response.splitlines()[1:-1])
-    print("cleaned_resp :\n", cleaned_resp)
     return cleaned_resp
 
 
@@ -77,19 +63,19 @@ def get_osm_id_from_nominatim(place_name):
     }
 
     try:
-        response = requests.get(url, headers=headers)
-        response.raise_for_status()  # Raise exception for HTTP errors
+        response = requests.get(url, headers=headers, timeout=15)
+        response.raise_for_status()
 
         data = response.json()
 
         if not data:
             return None, "No results found"
 
-        # Extract the OSM ID and type (node, way, relation)
-        osm_id = data[0].get("osm_id") + 3600000000
-        osm_type = "area code"  # data[0].get("osm_type")
+        result = data[0]
+        lat = float(result.get("lat", 0))
+        lon = float(result.get("lon", 0))
 
-        return {osm_type: osm_id}, None
+        return {"lat": lat, "lon": lon}, None
 
     except requests.exceptions.RequestException as e:
         return None, f"Error fetching data: {str(e)}"
@@ -364,24 +350,32 @@ def get_gdf(json_data):
         return None
 
 
+def _fetch_one(overpass_response):
+    try:
+        query = process_overpass(overpass_response)
+        json_data = get_json(query)
+        gdf = get_gdf(json_data)
+        if gdf is not None and not gdf.empty:
+            return gdf
+    except Exception as e:
+        print(f"[overpass error] {e}")
+    return None
+
+
 def get_response(overpassResponses):
-    gdf_list = []
-    for overpass_response in overpassResponses:
-        print("overpass_response : ", overpass_response)
-        try:
-            query = process_overpass(overpass_response)
-            json_data = get_json(query)
-            gdf_list.append(get_gdf(json_data))
-        except Exception as e:
-            print("err: ", e)
-            gdf_list.append()
-            continue
-    combined_gdf = pd.concat(gdf_list)
+    with ThreadPoolExecutor(max_workers=min(len(overpassResponses), 4)) as ex:
+        results = list(ex.map(_fetch_one, overpassResponses))
+    gdf_list = [g for g in results if g is not None and not g.empty]
+
+    if not gdf_list:
+        raise ValueError("No geospatial data returned from Overpass queries")
+
+    combined_gdf = pd.concat(gdf_list, ignore_index=True)
     combined_gdf["feature"] = (
         combined_gdf["tourism"].fillna("")
         + combined_gdf["amenity"].fillna("")
         + combined_gdf["historic"].fillna("")
         + combined_gdf["waterway"].fillna("")
     )
-    combined_gdf = combined_gdf.sample(n=min(len(combined_gdf), 10_000))
+    combined_gdf = combined_gdf.sample(n=min(len(combined_gdf), 2_000))
     return combined_gdf

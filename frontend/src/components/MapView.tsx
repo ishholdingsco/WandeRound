@@ -40,7 +40,7 @@ export default function MapView({ geojson }: { geojson: GeoJSONData }) {
     COLORS[Math.abs(clust ?? 0) % COLORS.length];
 
   return (
-    <div className="w-full h-72 rounded-xl overflow-hidden border border-zinc-100 mt-3">
+    <div className="w-full h-72 rounded-xl overflow-hidden border border-zinc-100 mt-3 isolate relative z-0">
       <MapContainer
         center={[0, 0]}
         zoom={2}

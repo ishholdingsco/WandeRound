@@ -1,6 +1,7 @@
 import pandas as pd
 import getpass
 import os
+import re
 from langchain_google_genai import ChatGoogleGenerativeAI
 import json
 from langchain_core.messages import BaseMessage
@@ -39,7 +40,7 @@ if "OPENAI_MODEL" not in os.environ:
 if "DEEPSEEK_API_KEY" not in os.environ:
     os.environ["DEEPSEEK_API_KEY"] = os.getenv("DEEPSEEK_API_KEY", "")
 if "DEEPSEEK_MODEL" not in os.environ:
-    os.environ["DEEPSEEK_MODEL"] = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")
+    os.environ["DEEPSEEK_MODEL"] = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
 
 
 class GeoColumn(TypedDict):
@@ -92,7 +93,6 @@ class AgentGraph:
                 max_tokens=None,
                 timeout=None,
                 max_retries=2,
-                callbacks=[StreamingStdOutCallbackHandler()],
             )
         elif model_source == "OPENAI":
             self.llm = ChatOpenAI(
@@ -100,7 +100,7 @@ class AgentGraph:
                 temperature=0,
                 max_tokens=None,
                 max_retries=2,
-                callbacks=[StreamingStdOutCallbackHandler()],
+                streaming=True,
             )
         elif model_source == "DEEPSEEK":
             self.llm = ChatOpenAI(
@@ -110,7 +110,7 @@ class AgentGraph:
                 max_retries=2,
                 api_key=os.environ["DEEPSEEK_API_KEY"],
                 base_url="https://api.deepseek.com",
-                callbacks=[StreamingStdOutCallbackHandler()],
+                streaming=True,
             )
 
     def _create_graph(self):
@@ -139,7 +139,6 @@ class AgentGraph:
             response = self.llm.invoke(
                 location_extraction_prompt.format_messages(input=input_text)
             )
-            print("response : ", response.content)
             if response.content in ["True", "true", True, "TRUE"]:
                 return {"trip": True}
             return {"trip": False}
@@ -166,26 +165,44 @@ class AgentGraph:
                 [
                     (
                         "system",
-                        "You are an AI assistant that give plan to user trip by extracting location names from user messages, creating 2 text instructions for creating instructions to get data via overpass API based on user input, and at max three steps to plan the trip."
-                        "Identify the most specific location mentioned. Create 2 text instructions for creating overpass API that return the body and Create at max 3 steps to plan the trip with the last step is to summarize the answers while the rest is to process data from overpass."
-                        "Return the name of the location, overpass instructions, and steps, nothing else."
-                        "Do not fetch the builidings in the area.",
+                        "You are a travel planning assistant. Extract trip information from the user message.\n\n"
+                        "Return ONLY a valid JSON object with exactly these fields:\n"
+                        "{{\n"
+                        '  "location": "the most specific location name mentioned",\n'
+                        '  "overpassInstructions": ["instruction 1 for overpass query", "instruction 2 for overpass query"],\n'
+                        '  "steps": ["step 1", "step 2", "step 3 (summarize)"]\n'
+                        "}}\n\n"
+                        "Rules:\n"
+                        "- overpassInstructions: exactly 2 instructions describing what OSM data to fetch\n"
+                        "- steps: at most 3 steps, the last step must be to summarize the answers\n"
+                        "- Do not fetch buildings\n"
+                        "- Return ONLY the JSON object, no markdown, no explanation",
                     ),
                     ("human", "extract information from: {input}"),
                 ]
             )
 
-            # print('input_text (extract_location) : ',input_text)
-            structured_llm = self.llm.with_structured_output(Extract)
-            response = structured_llm.invoke(
+            response = self.llm.invoke(
                 location_extraction_prompt.format_messages(input=input_text)
             )
-            # print('response (extract_location) : ',response)
+
+            content = response.content.strip()
+            # Strip thinking blocks emitted by reasoning models
+            content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+            # Strip markdown code fences
+            content = re.sub(r"```(?:json)?", "", content).replace("```", "").strip()
+            # Extract JSON object (from first { to last })
+            start = content.find("{")
+            end = content.rfind("}") + 1
+            if start == -1 or end <= start:
+                raise ValueError(f"No JSON found in model response: {content[:300]}")
+            data = json.loads(content[start:end])
+
             return {
-                "location": response.location,
-                "steps": response.steps,
-                "overpassInstructions": response.overpassInstructions,
-                "stepsState": -int(len(response.steps)),
+                "location": data["location"],
+                "steps": data["steps"],
+                "overpassInstructions": data["overpassInstructions"],
+                "stepsState": -int(len(data["steps"])),
                 "evalState": 0,
             }
 
@@ -216,29 +233,29 @@ class AgentGraph:
                     (
                         "system",
                         """
-            Assistant is an expert OpenStreetMap Overpass API assistant.
+            You are an expert OpenStreetMap Overpass API assistant.
 
-                For each question that the user supplies, the assistant will reply with:
-                The text of a valid Overpass API query using OSM geocode id that can be used to answer the question using geocode data: {geocode_data}. 
-                The query should be enclosed by three backticks on new lines, denoting that it is a code block.
-                the first line of the code is:
-                [out:json];
-                the last three lines of the code are:
-                    `// Output results
-                    out body;
-                    >;
-                    out skel qt;
-                    `
-                if you need to filter based on proximity use this example:
-                `// Filter tourism features that are within 50m of any canal
-                    (
-                    node.tourism_features(around.canals:50);
-                    way.tourism_features(around.canals:50);
-                    );`
-                choose carefully if the code will use node, way, or relation or any combination of them:
-                for example if user asked for canal only fetch `way` objects
-            Assistant will reply with only a relevant Overpass API that return the body information in form of json.
-            Do not fetch the builidings in the area..
+            The location has been geocoded to: {geocode_data}
+            Use the lat/lon coordinates with `around:` radius queries. Do NOT use area() queries.
+
+            For each question, reply with a valid Overpass API query enclosed in triple backticks.
+            Always use this structure:
+            ```
+            [out:json];
+            (
+              node["KEY"~"VALUE"](around:3000,LAT,LON);
+              way["KEY"~"VALUE"](around:3000,LAT,LON);
+            );
+            out body;
+            >;
+            out skel qt;
+            ```
+
+            Replace LAT and LON with the actual coordinates from the geocode data.
+            Use around:3000 (3km radius) by default.
+            Choose node, way, or both depending on what is being searched.
+            Do NOT fetch buildings.
+            Reply with ONLY the Overpass query code block, nothing else.
                 """,
                     ),
                     (
@@ -259,17 +276,16 @@ class AgentGraph:
                     ]
                 }
 
-            responses = []
-            for instruction in overpassInstructions:
-                # print('instruction : ',instruction)
-                response = self.llm.invoke(
-                    response_prompt.format_messages(
-                        location=location,
-                        geocode_data=json.dumps(geocode_data, indent=2),
-                        human_input=instruction,
-                    )
+            batch_inputs = [
+                response_prompt.format_messages(
+                    location=location,
+                    geocode_data=json.dumps(geocode_data, indent=2),
+                    human_input=instruction,
                 )
-                responses.append(response.content)
+                for instruction in overpassInstructions
+            ]
+            batch_results = self.llm.batch(batch_inputs)
+            responses = [r.content for r in batch_results]
 
             return {"overpassResponses": responses}
 
@@ -387,10 +403,6 @@ class AgentGraph:
             )
             # print("params : \n", geopandas_link, column_list, featureValue, question)
             try:
-                # code =  llm.invoke(code_prompt)
-                print(
-                    "params : \n", geopandas_link, column_list, featureValue, question
-                )
                 time.sleep(0.1)
                 code = self.llm.invoke(
                     code_creation_prompt.format_messages(
@@ -422,23 +434,14 @@ class AgentGraph:
             evalState = state.get("evalState", 0)
             step = state.get("stepsState", -3)
             try:
-                print(
-                    "execute_python --------------",
-                )
-                print("evalState : ", evalState)
-                print("step : ", step)
                 code = state.get("stepCodes")[-1]
-                print("code \n ", type(code))
-                print("code \n ", code)
                 code_resp = get_exec_printed_result(process_overpass(code))
-                print("CHECK")
                 return {
                     "codeResult": code_resp,
                     "codeStatus": "PASS",
                     "stepsState": step + 1,
                 }
             except Exception as e:
-                print("code : \n", code)
                 return {
                     "error": e,
                     "codeStatus": "ERROR",
@@ -451,26 +454,12 @@ class AgentGraph:
 
             status = state.get("codeStatus", "PASS")
 
-            print(
-                "eval_code ------------------------------------------------------------"
-            )
-
             if status == "PASS":
-                print("eval_code: PASS")
-                # stepsState = stepsState + 1
                 code = state.get("stepCodes")[-1]
-
                 state["stepCodes"][-1] = code.content
-                print("PASS-code : \n", code.content)
-                print("PASS-state['stepCodes'][-1] : \n", state["stepCodes"][-1])
                 return {"stepsState": stepsState}
             elif status == "ERROR" and evalState < 3:
-                # fix the step etc ....
-
-                print("eval_code: ERRR")
-                print("eval_code - stepsState : ", stepsState)
                 err = state.get("err", "")
-                print("eval_code - err : ", err)
                 geopandas_link = state.get("geopandasData", None)
 
                 curr_state = state.get("stepsState", None)
@@ -513,10 +502,7 @@ class AgentGraph:
                         err=err,
                     )
                 )
-                print("fix_code : \n", fix_code)
-                print("fix_code.content : \n", fix_code.content)
                 evalState = evalState + 1
-                print('state["stepCodes"] : ', state["stepCodes"][-1])
                 state["stepCodes"][-1] = fix_code.content
                 # print('state["stepCodes"] : \n', state["stepCodes"])
                 return {"evalState": evalState}
@@ -524,16 +510,12 @@ class AgentGraph:
         def router(state):
             status = state.get("codeStatus", "PASS")
             if state.get("evalState", 0) >= 3:
-                print("to USUAL")
                 return "usual"
             elif state.get("stepsState", -3) == -1:
-                print("to GET_SUMMARY")
                 return "get_summary"
             elif status == "ERROR":
-                print("to EVAL_CODE")
                 return "eval_code"
             else:
-                print("to GET_CODE")
                 return "get_code"
 
         def get_summary(state: AgentState) -> AgentState:
@@ -549,8 +531,6 @@ class AgentGraph:
                     for resp, res in zip(response, results)
                 ]
             )
-
-            print("wrap_up : \n", wrap_up)
 
             summary_prompt = ChatPromptTemplate.from_messages(
                 [

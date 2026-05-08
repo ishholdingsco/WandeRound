@@ -3,5 +3,7 @@
 data/*.gpkg
 frontend/node_modules
 frontend/.next
+frontend/tsconfig.tsbuildinfo
+chat_threads.json
 __pycache__
 *.pyc

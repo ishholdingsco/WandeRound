@@ -109,7 +109,9 @@ export default function Home() {
     let geodataFile: string | null = null;
 
     try {
-      const response = await fetch("/api/chat/stream", {
+      const backendUrl =
+        process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
+      const response = await fetch(`${backendUrl}/api/chat/stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ thread_id: currentThreadId, message: input }),
@@ -181,8 +183,8 @@ export default function Home() {
               });
             }
 
-            if (event.type === "response") {
-              finalContent = event.content ?? "";
+            if (event.type === "delta") {
+              finalContent += event.content ?? "";
               setMessages((prev) => {
                 const msgs = [...prev];
                 msgs[msgs.length - 1] = {
@@ -191,6 +193,20 @@ export default function Home() {
                 };
                 return msgs;
               });
+            }
+
+            if (event.type === "response") {
+              if (event.content) {
+                finalContent = event.content;
+                setMessages((prev) => {
+                  const msgs = [...prev];
+                  msgs[msgs.length - 1] = {
+                    ...msgs[msgs.length - 1],
+                    content: finalContent,
+                  };
+                  return msgs;
+                });
+              }
             }
 
             if (event.type === "done") {
@@ -237,15 +253,36 @@ export default function Home() {
     }
   };
 
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+
+  const handleSelectThread = (id: string) => {
+    setCurrentThreadId(id);
+    setSidebarOpen(false);
+  };
+
+  const handleCreateThread = async () => {
+    await createThread();
+    setSidebarOpen(false);
+  };
+
   return (
-    <div className="flex h-screen overflow-hidden bg-white">
+    <div className="flex h-screen overflow-hidden bg-white relative">
+      {sidebarOpen && (
+        <div
+          onClick={() => setSidebarOpen(false)}
+          className="fixed inset-0 bg-black/50 z-[998] md:hidden"
+          aria-hidden
+        />
+      )}
       <ChatSidebar
         threads={threads}
         currentThreadId={currentThreadId}
-        onSelectThread={setCurrentThreadId}
-        onCreateThread={createThread}
+        onSelectThread={handleSelectThread}
+        onCreateThread={handleCreateThread}
         onDeleteThread={deleteThread}
         onRenameThread={renameThread}
+        isOpen={sidebarOpen}
+        onClose={() => setSidebarOpen(false)}
       />
       <ChatWindow
         messages={messages}
@@ -253,6 +290,7 @@ export default function Home() {
         onSendMessage={sendMessage}
         hasThread={!!currentThreadId}
         onCreateThread={createThread}
+        onOpenSidebar={() => setSidebarOpen(true)}
       />
     </div>
   );

@@ -10,9 +10,7 @@ def get_cluster(combined_gdf):
     min_cluster_size = max(10, int(len(combined_gdf) / 200))
 
     clustering = HDBSCAN(min_cluster_size=min_cluster_size).fit(data)
-    print(len(clustering.labels_))
     combined_gdf["clust"] = clustering.labels_
-    print(len(set(clustering.labels_)))
     combined_gdf = combined_gdf.reindex(
         columns=[
             "type",
