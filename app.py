@@ -29,13 +29,17 @@ from langchain_openai import ChatOpenAI
 load_dotenv()
 
 if "GOOGLE_API_KEY" not in os.environ:
-    os.environ["GOOGLE_API_KEY"] = os.getenv("GOOGLE_API_KEY")
+    os.environ["GOOGLE_API_KEY"] = os.getenv("GOOGLE_API_KEY", "")
 if "OPENAI_API_KEY" not in os.environ:
-    os.environ["OPENAI_API_KEY"] = os.getenv("OPENAI_API_KEY")
+    os.environ["OPENAI_API_KEY"] = os.getenv("OPENAI_API_KEY", "")
 if "GOOGLE_MODEL" not in os.environ:
-    os.environ["GOOGLE_MODEL"] = os.getenv("GOOGLE_MODEL")
+    os.environ["GOOGLE_MODEL"] = os.getenv("GOOGLE_MODEL", "")
 if "OPENAI_MODEL" not in os.environ:
-    os.environ["OPENAI_MODEL"] = os.getenv("OPENAI_MODEL")
+    os.environ["OPENAI_MODEL"] = os.getenv("OPENAI_MODEL", "")
+if "DEEPSEEK_API_KEY" not in os.environ:
+    os.environ["DEEPSEEK_API_KEY"] = os.getenv("DEEPSEEK_API_KEY", "")
+if "DEEPSEEK_MODEL" not in os.environ:
+    os.environ["DEEPSEEK_MODEL"] = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")
 
 
 class GeoColumn(TypedDict):
@@ -92,10 +96,20 @@ class AgentGraph:
             )
         elif model_source == "OPENAI":
             self.llm = ChatOpenAI(
-                model=os.environ["OPENAI_MODEL"],  # specify the model name
+                model=os.environ["OPENAI_MODEL"],
                 temperature=0,
                 max_tokens=None,
                 max_retries=2,
+                callbacks=[StreamingStdOutCallbackHandler()],
+            )
+        elif model_source == "DEEPSEEK":
+            self.llm = ChatOpenAI(
+                model=os.environ["DEEPSEEK_MODEL"],
+                temperature=0,
+                max_tokens=None,
+                max_retries=2,
+                api_key=os.environ["DEEPSEEK_API_KEY"],
+                base_url="https://api.deepseek.com",
                 callbacks=[StreamingStdOutCallbackHandler()],
             )
 
@@ -274,6 +288,7 @@ class AgentGraph:
 
                 route = get_route(distance_matrix)
 
+                os.makedirs("./data", exist_ok=True)
                 file_name = f"./data/sample_{uuid.uuid4()}.gpkg"
 
                 combined_gdf.to_file(file_name)

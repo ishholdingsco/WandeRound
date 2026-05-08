@@ -7,6 +7,20 @@ import uuid
 import geopandas as gpd
 import branca.colormap as cm
 from streamlit_folium import st_folium, folium_static
+
+# Load Streamlit secrets into os.environ (works on Streamlit Community Cloud)
+_SECRET_KEYS = [
+    "DEEPSEEK_API_KEY", "DEEPSEEK_MODEL",
+    "GOOGLE_API_KEY", "GOOGLE_MODEL",
+    "OPENAI_API_KEY", "OPENAI_MODEL",
+]
+for _k in _SECRET_KEYS:
+    if _k not in os.environ:
+        try:
+            os.environ[_k] = st.secrets[_k]
+        except (KeyError, FileNotFoundError):
+            pass
+
 import app
 
 
@@ -225,8 +239,8 @@ def main():
 
         model_option = st.selectbox(
             "Choose model source?",
-            ("GOOGLE", "OPENAI"),
-            index=None,
+            ("DEEPSEEK", "GOOGLE", "OPENAI"),
+            index=0,
             placeholder="Select contact method...",
         )
         st.write("You selected:", model_option)
