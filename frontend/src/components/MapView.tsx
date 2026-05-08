@@ -4,6 +4,7 @@ import { useEffect } from "react";
 import { MapContainer, TileLayer, GeoJSON, useMap } from "react-leaflet";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
+import type { GeoJsonObject } from "geojson";
 import type { GeoJSONData } from "@/types";
 
 const COLORS = [
@@ -54,7 +55,7 @@ export default function MapView({ geojson }: { geojson: GeoJSONData }) {
           subdomains="abcd"
         />
         <GeoJSON
-          data={geojson as Parameters<typeof L.geoJSON>[0]}
+          data={geojson as unknown as GeoJsonObject}
           pointToLayer={(feature, latlng) => {
             const color = clusterColor(
               feature.properties?.clust as number
