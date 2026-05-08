@@ -10,7 +10,7 @@ from typing import Dict, List, Optional, TypedDict, Tuple, Any, Annotated
 from langchain_core.prompts import ChatPromptTemplate
 from langgraph.graph import END, StateGraph
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
-from langchain.callbacks.streaming_stdout import StreamingStdOutCallbackHandler
+from langchain_core.callbacks.streaming_stdout import StreamingStdOutCallbackHandler
 from pydantic import BaseModel, Field
 from typing import List
 import uuid

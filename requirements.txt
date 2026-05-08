@@ -11,9 +11,11 @@ langchain_google_genai
 langchain_core
 langchain
 langgraph
-folium
 matplotlib
 mapclassify
 python-dotenv
 streamlit_folium
 langchain-openai
+fastapi
+uvicorn[standard]
+python-multipart
