@@ -72,30 +72,28 @@ function MessageBubble({
         ) : isUser ? (
           <p className="whitespace-pre-wrap">{msg.content}</p>
         ) : (
-          <div className="prose prose-sm prose-zinc max-w-none
-            prose-headings:font-semibold prose-headings:text-zinc-800
-            prose-h3:text-sm prose-h3:mt-3 prose-h3:mb-1
-            prose-p:text-zinc-700 prose-p:my-1.5
-            prose-li:text-zinc-700 prose-li:my-0.5
-            prose-ul:my-1.5 prose-ol:my-1.5
-            prose-strong:text-zinc-800 prose-strong:font-semibold
-            prose-code:text-zinc-700 prose-code:bg-zinc-100 prose-code:px-1 prose-code:rounded
-            prose-a:text-blue-600 prose-a:no-underline hover:prose-a:underline">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>
-              {msg.content}
-            </ReactMarkdown>
-          </div>
-        )}
-
-        {!isUser &&
-          msg.thinking_steps &&
-          msg.thinking_steps.length > 0 && (
-            <div className="mt-2">
-              <ThinkingAccordion steps={msg.thinking_steps} />
+          <>
+            {msg.thinking_steps && msg.thinking_steps.length > 0 && (
+              <div className="mb-2">
+                <ThinkingAccordion steps={msg.thinking_steps} />
+              </div>
+            )}
+            <div className="prose prose-sm prose-zinc max-w-none
+              prose-headings:font-semibold prose-headings:text-zinc-800
+              prose-h3:text-sm prose-h3:mt-3 prose-h3:mb-1
+              prose-p:text-zinc-700 prose-p:my-1.5
+              prose-li:text-zinc-700 prose-li:my-0.5
+              prose-ul:my-1.5 prose-ol:my-1.5
+              prose-strong:text-zinc-800 prose-strong:font-semibold
+              prose-code:text-zinc-700 prose-code:bg-zinc-100 prose-code:px-1 prose-code:rounded
+              prose-a:text-blue-600 prose-a:no-underline hover:prose-a:underline">
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                {msg.content}
+              </ReactMarkdown>
             </div>
-          )}
-
-        {!isUser && msg.geojson && <MapView geojson={msg.geojson} />}
+            {msg.geojson && <MapView geojson={msg.geojson} />}
+          </>
+        )}
       </div>
     </div>
   );

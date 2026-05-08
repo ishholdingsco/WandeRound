@@ -309,16 +309,6 @@ class AgentGraph:
 
                 combined_gdf.to_file(file_name)
 
-                df_order = pd.DataFrame(
-                    {"clust": route, "order": [i for i in range(len(route))]}
-                )
-
-                df_order = clust_centroid.merge(df_order, on="clust")
-
-                path = df_order.sort_values("order")[0].to_list()
-
-                path = LineString(path + [path[0]])
-
                 return {
                     "overpassStatus": True,
                     "geopandasData": file_name,
